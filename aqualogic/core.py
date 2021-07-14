@@ -12,9 +12,10 @@ import time
 import serial
 import datetime
 
-from .web import WebServer
-from .states import States
-from .keys import Keys
+from web import WebServer
+from states import States
+from keys import Keys
+from frames import Frames
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -22,27 +23,7 @@ _LOGGER = logging.getLogger(__name__)
 class AquaLogic():
     """Hayward/Goldline AquaLogic/ProLogic pool controller."""
 
-    # pylint: disable=too-many-instance-attributes
-    FRAME_DLE = 0x10
-    FRAME_STX = 0x02
-    FRAME_ETX = 0x03
-
-    READ_TIMEOUT = 5
-
-    # Local wired panel (black face with service button)
-    FRAME_TYPE_LOCAL_WIRED_KEY_EVENT = b'\x00\x02'
-    # Remote wired panel (white face)
-    FRAME_TYPE_REMOTE_WIRED_KEY_EVENT = b'\x00\x03'
-    # Wireless remote
-    FRAME_TYPE_WIRELESS_KEY_EVENT = b'\x00\x83'
-    FRAME_TYPE_ON_OFF_EVENT = b'\x00\x05'   # Seems to only work for some keys
-
-    FRAME_TYPE_KEEP_ALIVE = b'\x01\x01'
-    FRAME_TYPE_LEDS = b'\x01\x02'
-    FRAME_TYPE_DISPLAY_UPDATE = b'\x01\x03'
-    FRAME_TYPE_LONG_DISPLAY_UPDATE = b'\x04\x0a'
-    FRAME_TYPE_PUMP_SPEED_REQUEST = b'\x0c\x01'
-    FRAME_TYPE_PUMP_STATUS = b'\x00\x0c'
+    READ_TIMEOUT = 30
 
     def __init__(self, web_port=8129):
         self._socket = None
@@ -175,10 +156,10 @@ class AquaLogic():
 
                 while True:
                     # Search for FRAME_DLE + FRAME_STX
-                    if byte == self.FRAME_DLE:
+                    if byte == Frames.FRAME_DLE.value:
                         frame_start_time = time.monotonic()
                         next_byte = self._read()
-                        if next_byte == self.FRAME_STX:
+                        if next_byte == Frames.FRAME_STX.value:
                             break
                         else:
                             continue
@@ -192,11 +173,11 @@ class AquaLogic():
                 byte = self._read()
 
                 while True:
-                    if byte == self.FRAME_DLE:
+                    if byte == Frames.FRAME_DLE.value:
                         # Should be FRAME_ETX or 0 according to
                         # the AQ-CO-SERIAL manual
                         next_byte = self._read()
-                        if next_byte == self.FRAME_ETX:
+                        if next_byte == Frames.FRAME_ETX.value:
                             break
                         elif next_byte != 0:
                             # Error?
@@ -209,7 +190,7 @@ class AquaLogic():
                 frame_crc = int.from_bytes(frame[-2:], byteorder='big')
                 frame = frame[:-2]
 
-                calculated_crc = self.FRAME_DLE + self.FRAME_STX
+                calculated_crc = Frames.FRAME_DLE.value + Frames.FRAME_STX.value
                 for byte in frame:
                     calculated_crc += byte
 
@@ -220,7 +201,16 @@ class AquaLogic():
                 frame_type = frame[0:2]
                 frame = frame[2:]
 
-                if frame_type == self.FRAME_TYPE_KEEP_ALIVE:
+                # uncomment to dump BUS, breaks the CLI
+                # try:
+                #     print(Frames(frame_type).name)
+                #     print(frame)
+                # except ValueError:
+                #     print("Unknown frame!!")
+                #     print(frame_type)
+                #     print(frame)
+
+                if frame_type == Frames.FRAME_TYPE_KEEP_ALIVE.value:
                     # Keep alive
                     # _LOGGER.debug('%3.3f: KA', frame_start_time)
 
@@ -229,16 +219,16 @@ class AquaLogic():
                         self._send_frame()
 
                     continue
-                elif frame_type == self.FRAME_TYPE_LOCAL_WIRED_KEY_EVENT:
+                elif frame_type == Frames.FRAME_TYPE_LOCAL_WIRED_KEY_EVENT.value:
                     _LOGGER.debug('%3.3f: Local Wired Key: %s',
                                   frame_start_time, binascii.hexlify(frame))
-                elif frame_type == self.FRAME_TYPE_REMOTE_WIRED_KEY_EVENT:
+                elif frame_type == Frames.FRAME_TYPE_REMOTE_WIRED_KEY_EVENT.value:
                     _LOGGER.debug('%3.3f: Remote Wired Key: %s',
                                   frame_start_time, binascii.hexlify(frame))
-                elif frame_type == self.FRAME_TYPE_WIRELESS_KEY_EVENT:
+                elif frame_type == Frames.FRAME_TYPE_WIRELESS_KEY_EVENT.value:
                     _LOGGER.debug('%3.3f: Wireless Key: %s',
                                   frame_start_time, binascii.hexlify(frame))
-                elif frame_type == self.FRAME_TYPE_LEDS:
+                elif frame_type == Frames.FRAME_TYPE_LEDS.value:
                     # _LOGGER.debug('%3.3f: LEDs: %s',
                     #              frame_start_time, binascii.hexlify(frame))
                     # First 4 bytes are the LEDs that are on;
@@ -254,14 +244,14 @@ class AquaLogic():
                         self._states = states
                         self._flashing_states = flashing_states
                         data_changed_callback(self)
-                elif frame_type == self.FRAME_TYPE_PUMP_SPEED_REQUEST:
+                elif frame_type == Frames.FRAME_TYPE_PUMP_SPEED_REQUEST.value:
                     value = int.from_bytes(frame[0:2], byteorder='big')
                     _LOGGER.debug('%3.3f: Pump speed request: %d%%',
                                   frame_start_time, value)
                     if self._pump_speed != value:
                         self._pump_speed = value
                         data_changed_callback(self)
-                elif ((frame_type == self.FRAME_TYPE_PUMP_STATUS) and
+                elif ((frame_type == Frames.FRAME_TYPE_PUMP_STATUS.value) and
                       (len(frame) >= 5)):
                     # Pump status messages sent out by Hayward VSP pumps
                     self._multi_speed_pump = True
@@ -276,16 +266,16 @@ class AquaLogic():
                     if self._pump_power != power:
                         self._pump_power = power
                         data_changed_callback(self)
-                elif frame_type == self.FRAME_TYPE_DISPLAY_UPDATE:
-                    # Convert LCD-specific degree symbol and decode to utf-8
-                    text = frame.replace(b'\xdf', b'\xc2\xb0').decode('utf-8')
-                    parts = text.split()
-                    _LOGGER.debug('%3.3f: Display update: %s',
-                                  frame_start_time, parts)
-
-                    self._web.text_updated(text)
-
+                elif frame_type == Frames.FRAME_TYPE_DISPLAY_UPDATE.value:
                     try:
+                        # Convert LCD-specific degree symbol and decode to utf-8
+                        text = frame.replace(b'\xdf', b'\xc2\xb0').decode('utf-8')
+                        parts = text.split()
+                        _LOGGER.debug('%3.3f: Display update: %s',
+                                      frame_start_time, parts)
+
+                        self._web.text_updated(text)
+
                         if parts[0] == 'Pool' and parts[1] == 'Temp':
                             # Pool Temp <temp>°[C|F]
                             value = int(parts[2][:-2])
@@ -336,7 +326,10 @@ class AquaLogic():
                             self._heater_auto_mode = parts[1] == 'Auto'
                     except ValueError:
                         pass
-                elif frame_type == self.FRAME_TYPE_LONG_DISPLAY_UPDATE:
+                    except UnicodeDecodeError:
+                        print("DISPLAY UPDATE DECODE FAILED")
+                        print(frame)
+                elif frame_type == Frames.FRAME_TYPE_LONG_DISPLAY_UPDATE.value:
                     # Not currently parsed
                     pass
                 else:
@@ -354,22 +347,35 @@ class AquaLogic():
     def _append_data(self, frame, data):
         for byte in data:
             frame.append(byte)
-            if byte == self.FRAME_DLE:
+            if byte == Frames.FRAME_DLE.value:
                 frame.append(0)
 
     def _get_key_event_frame(self, key):
         frame = bytearray()
-        frame.append(self.FRAME_DLE)
-        frame.append(self.FRAME_STX)
+        frame.append(Frames.FRAME_DLE.value)
+        frame.append(Frames.FRAME_STX.value)
 
-        if key.value > 0xffff:
-            self._append_data(frame, self.FRAME_TYPE_WIRELESS_KEY_EVENT)
+        if key.value == Keys.FILTER:
+            print("SENDING CUSTOM FILTER VIA WIRED!!!")
+            self._append_data(frame, Frames.FRAME_TYPE_LOCAL_WIRED_KEY_EVENT.value)
+            self._append_data(frame, b'\x01')
+            self._append_data(frame, key.value.to_bytes(4, byteorder='little'))
+            self._append_data(frame, key.value.to_bytes(4, byteorder='little'))
+        elif key.value == Keys.LIGHTS:
+            print("SENDING LIGHTS VIA WIRELESS!!!")
+            self._append_data(frame, Frames.FRAME_TYPE_AQUAPOD_KEY_EVENT.value)
+            self._append_data(frame, b'\x01')
+            self._append_data(frame, key.value.to_bytes(4, byteorder='little'))
+            self._append_data(frame, key.value.to_bytes(3, byteorder='little'))
+            self._append_data(frame, b'\x00')
+        elif key.value > 0xffff:
+            self._append_data(frame, Frames.FRAME_TYPE_WIRELESS_KEY_EVENT.value)
             self._append_data(frame, b'\x01')
             self._append_data(frame, key.value.to_bytes(4, byteorder='little'))
             self._append_data(frame, key.value.to_bytes(4, byteorder='little'))
             self._append_data(frame, b'\x00')
         else:
-            self._append_data(frame, self.FRAME_TYPE_LOCAL_WIRED_KEY_EVENT)
+            self._append_data(frame, Frames.FRAME_TYPE_LOCAL_WIRED_KEY_EVENT.value)
             self._append_data(frame, key.value.to_bytes(2, byteorder='little'))
             self._append_data(frame, key.value.to_bytes(2, byteorder='little'))
 
@@ -378,8 +384,8 @@ class AquaLogic():
             crc += byte
         self._append_data(frame, crc.to_bytes(2, byteorder='big'))
 
-        frame.append(self.FRAME_DLE)
-        frame.append(self.FRAME_ETX)
+        frame.append(Frames.FRAME_DLE.value)
+        frame.append(Frames.FRAME_ETX.value)
 
         return frame
 

@@ -7,7 +7,7 @@ import websockets
 import threading
 import logging
 
-from .keys import Keys
+from keys import Keys
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ class WebServer():
         self._loop.call_soon_threadsafe(self._msg_queue.put_nowait, text)
 
     async def _root_handler(self, request):
-        s = open('aqualogic/web.html', 'r')
+        s = open('web.html', 'r')
         return web.Response(text=s.read(), content_type='text/html')
 
     async def _websocket_handler(self, request):
